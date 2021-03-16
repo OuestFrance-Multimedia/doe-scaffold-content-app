@@ -1,12 +1,21 @@
-# Usage
-  
-* Put your _source code_ in the `sources` directory
-* Put your _dockerfiles_ in the `build` directory
-* Put your _run environment_ (k8s yaml / docker-compose yaml) in the `charts` directory
+# README
 
+## The application
 
-# (try to) Get rid of docker-compose
+Your application **MUST** follow the [12 factor App methodology](https://12factor.net/fr/)
 
-Docker compose is to much confusing when your app runs in Kubernetes: you live with 2 descriptions of your application and they are not cross compatible.
+## Herarchy
 
-Try to install [k3s](https://rancher.com/docs/k3s/latest/en/) on your workstation and run your app using native Kubernetes yaml descriptions.
+ * Add your _source code_ in the `sources` directory
+ * Add your _dockerfiles_ in the `build` directory
+ * Add your docker-compose yaml in the root directory
+
+## .gitlab-ci.yaml file
+
+This repository provides a simple gitlab-ci yaml file to help you bootstrap your project.
+Feel free to update it with your project requierments (e.g. tests)
+
+Deploy jobs **MUST** be compliants with this workflow :
+
+ * `development` and `recette` environments updates the `non-production` branch of the charts reposotiry (helm)
+ * `preproduction` and `production` environments updates the `non-production` branch of the charts reposotiry (helm)
