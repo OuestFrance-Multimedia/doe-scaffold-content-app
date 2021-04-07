@@ -30,21 +30,53 @@ build:
     - docker push $REPOSITORY/${PROJECT_NAME}:$CI_COMMIT_TAG
     - docker images
 
+deploy-dev:
+  stage: deploy
+  script:
+    ## SSH Configuration
+    - apk add git
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cat ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
+    - ssh -q -T git@gitlab.com
+
+    ## GIT Configuration
+    - git config --global user.name $GITLAB_USER_LOGIN
+    - git config --global user.email $GITLAB_USER_EMAIL
+
+    ## Clone, commit & push
+    - git clone ${SSH_URL_TO_MANIFEST_REPO} && cd "$(basename "$_" .git)"
+    - git checkout unrestricted
+
+    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-dev.yaml app_version $CI_COMMIT_TAG
+    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml image_name $PROJECT_NAME
+    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml repository $REPOSITORY
+    - git commit -am "update image dev commit" && git push origin unrestricted
+
 deploy-preprod:
   stage: deploy
   only:
     - tags
   script:
+    ## SSH Configuration
     - apk add git
-    - git clone "https://$CI_CUSTOM_USER:$CI_CUSTOM_USER_TOKEN@gitlab.com/additi/internal/dsi-devops-engineers/platform_configuration_helm_devops-demo.git"
-    - cd platform_configuration_helm_devops-demo
-    - git checkout non-production
-    - git config --global user.name "${PROJECT_NAME} CI"
-    - git config --global user.email "${PROJECT_NAME}ci@gitlab.com"
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-preproduction.yaml app_version $CI_COMMIT_TAG
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cat ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
+    - ssh -q -T git@gitlab.com
+
+    ## GIT Configuration
+    - git config --global user.name $GITLAB_USER_LOGIN
+    - git config --global user.email $GITLAB_USER_EMAIL
+
+    ## Clone, commit & push
+    - git clone ${SSH_URL_TO_MANIFEST_REPO} && cd "$(basename "$_" .git)"
+    - git checkout restricted
+
+    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-preprodn.yaml app_version $CI_COMMIT_TAG
     - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml image_name $PROJECT_NAME
     - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml repository $REPOSITORY
-    - git commit -am "update image preprod tag" && git push origin non-production
+    - git commit -am "update image preprod tag" && git push origin restricted
 
 deploy-prod:
   stage: deploy
@@ -52,13 +84,23 @@ deploy-prod:
   only:
     - tags
   script:
+    ## SSH Configuration
     - apk add git
-    - git clone "https://$CI_CUSTOM_USER:$CI_CUSTOM_USER_TOKEN@gitlab.com/additi/internal/dsi-devops-engineers/platform_configuration_helm_devops-demo.git"
-    - cd platform_configuration_helm_devops-demo
-    - git config --global user.name "${PROJECT_NAME} CI"
-    - git config --global user.email "${PROJECT_NAME}ci@gitlab.com"
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-production.yaml app_version $CI_COMMIT_TAG
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cat ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
+    - ssh -q -T git@gitlab.com
+
+    ## GIT Configuration
+    - git config --global user.name $GITLAB_USER_LOGIN
+    - git config --global user.email $GITLAB_USER_EMAIL
+
+    ## Clone, commit & push
+    - git clone ${SSH_URL_TO_MANIFEST_REPO} && cd "$(basename "$_" .git)"
+    - git checkout restricted
+
+    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-prod.yaml app_version $CI_COMMIT_TAG
     - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml image_name $PROJECT_NAME
     - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml repository $REPOSITORY
-    - git commit -am "update prod image tag" && git push origin master
+    - git commit -am "update prod image tag" && git push origin restricted
 
