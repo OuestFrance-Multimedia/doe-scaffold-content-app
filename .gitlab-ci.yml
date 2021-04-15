@@ -1,106 +1,164 @@
-image: docker:20.10
+.template_push_into_registry: &template_push_into_registry
+  stage: push
+  before_script:
+    # récupération de l'image dans la registry de dev
+    - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
 
-services:
-  - docker:20.10-dind
-
-before_script:
-  - export PROJECT_NAME=${CI_PROJECT_NAME/content-app-/}
-
-stages:
-  - build
-  - deploy
-
-build:
-  stage: build
-  only:
-    - tags
-  script:
     # Install gcloud sdk
     - apk upgrade && apk add --no-cache curl openssl jq python3
     - curl -s https://dl.google.com/dl/cloudsdk/release/google-cloud-sdk.tar.gz > /tmp/google-cloud-sdk.tar.gz
     - mkdir -p /usr/local/gcloud && tar -C /usr/local/gcloud -xvf /tmp/google-cloud-sdk.tar.gz && /usr/local/gcloud/google-cloud-sdk/install.sh --quiet
     - export PATH=$PATH:/usr/local/gcloud/google-cloud-sdk/bin
 
-    # Configure Docker to use the project registry (Google Artifact Registry)
-    - gcloud auth activate-service-account --key-file=${GOOGLE_APPLICATION_CREDENTIALS}
-    - gcloud auth configure-docker ${REPOSITORY%%/*} --quiet
+.template_deploy: &template_deploy
+  stage: deploy
+  before_script:
+    ## SSH Configuration
+    - apk add git
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - cat $SSH_PRIVATE_KEY > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
+    - ssh -q -T git@gitlab.com
+
+    ## GIT Configuration
+    - git config --global user.name $GITLAB_USER_LOGIN
+    - git config --global user.email $GITLAB_USER_EMAIL
+
+.template_deploy_into_restricted_infrastructure: &template_deploy_into_restricted_infrastructure
+  <<: *template_deploy
+  script:
+    - export VAR_PROJECTID=$(basename ${REPOSITORY_RESTRICTED%/*})
+    ## Clone, commit & push
+    - git clone $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
+    - git checkout restricted
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.registry = "'${REPOSITORY_RESTRICTED%%/*}'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.repository = "'${REPOSITORY_RESTRICTED#*/}/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.tag = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.env.fromValues.APP_VERSION = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.gcloudsqlproxy.cloudsql.instances[0].project = "'${VAR_PROJECTID}'"' --inplace $VALUES_FILENAME
+    - git commit -am "update image tag" && git push origin restricted
+
+.template_deploy_into_unrestricted_infrastructure: &template_deploy_into_unrestricted_infrastructure
+  <<: *template_deploy
+  script:
+    - export VAR_PROJECTID=$(basename ${REPOSITORY_UNRESTRICTED%/*})
+    ## Clone, commit & push
+    - git clone $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
+    - git checkout unrestricted
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.registry = "'${REPOSITORY_UNRESTRICTED%%/*}'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.repository = "'${REPOSITORY_UNRESTRICTED#*/}/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.tag = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.env.fromValues.APP_VERSION = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.gcloudsqlproxy.cloudsql.instances[0].project = "'${VAR_PROJECTID}'"' --inplace $VALUES_FILENAME
+    - git commit -am "update image tag" && git push origin unrestricted
+
+image: docker:20.10
+
+services:
+  - docker:20.10-dind
+
+stages:
+  - build
+  - tests
+  - push
+  - deploy
+
+Build:
+  stage: build
+  script:
+    - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest || true
+    - # `docker build` your image here
+    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest
+    - docker images
+    - docker push $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+    - docker push $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest
+
+Test Unit:
+  stage: tests
+  script:
+    - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+    - # `docker run` your container here
+    - # `docker exec` your tests here
+  # Extract code coverage to get the info in gitlab : https://docs.gitlab.com/ee/ci/yaml/#coverage
+  # coverage: /^\s*Lines:\s*\d+.\d+\%/
+
+Push-dev:
+  <<: *template_push_into_registry
+  when: manual
+  except :
+    - tags
+    - master
+    - develop
+  script:
+    # Configure Docker to use the project registry (Google Artifact Registry) 
+    - gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
+    - gcloud auth configure-docker ${REPOSITORY_UNRESTRICTED%%/*} --quiet
 
     # Build & Push
-    - docker build -t $REPOSITORY/${PROJECT_NAME}:$CI_COMMIT_TAG -f build/Dockerfile .
-    - docker push $REPOSITORY/${PROJECT_NAME}:$CI_COMMIT_TAG
-    - docker images
+    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+    - docker push $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
 
-deploy-dev:
-  stage: deploy
+Push-rec:
+  <<: *template_push_into_registry
+  only :
+    - develop
   script:
-    ## SSH Configuration
-    - apk add git
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - cat ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
-    - ssh -q -T git@gitlab.com
+    # Configure Docker to use the project registry (Google Artifact Registry)
+    - gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
+    - gcloud auth configure-docker ${REPOSITORY_UNRESTRICTED%%/*} --quiet
 
-    ## GIT Configuration
-    - git config --global user.name $GITLAB_USER_LOGIN
-    - git config --global user.email $GITLAB_USER_EMAIL
+    # Build & Push
+    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+    - docker push $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
 
-    ## Clone, commit & push
-    - git clone ${SSH_URL_TO_MANIFEST_REPO} && cd "$(basename "$_" .git)"
-    - git checkout unrestricted
+Push-prod-preprod:
+  <<: *template_push_into_registry
+  only:
+    - tags
+  script:
+    # Configure Docker to use the project registry (Google Artifact Registry) 
+    - gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
+    - gcloud auth configure-docker ${REPOSITORY_RESTRICTED%%/*} --quiet
 
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-dev.yaml app_version $CI_COMMIT_TAG
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml image_name $PROJECT_NAME
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml repository $REPOSITORY
-    - git commit -am "update image dev commit" && git push origin unrestricted
+    # Build & Push
+    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $REPOSITORY_RESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_TAG
+    - docker push $REPOSITORY_RESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_TAG
+
+deploy-dev1:
+  <<: *template_deploy_into_unrestricted_infrastructure
+  variables:
+    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
+  when: manual
+  except:
+    - tags
+    - master
+    - develop
+
+deploy-rec1:
+  <<: *template_deploy_into_unrestricted_infrastructure
+  variables:
+    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
+  only:
+    - develop
+  needs: [Push-rec]
 
 deploy-preprod:
-  stage: deploy
+  <<: *template_deploy_into_restricted_infrastructure
+  variables:
+    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
   only:
     - tags
-  script:
-    ## SSH Configuration
-    - apk add git
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - cat ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
-    - ssh -q -T git@gitlab.com
-
-    ## GIT Configuration
-    - git config --global user.name $GITLAB_USER_LOGIN
-    - git config --global user.email $GITLAB_USER_EMAIL
-
-    ## Clone, commit & push
-    - git clone ${SSH_URL_TO_MANIFEST_REPO} && cd "$(basename "$_" .git)"
-    - git checkout restricted
-
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-preprodn.yaml app_version $CI_COMMIT_TAG
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml image_name $PROJECT_NAME
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml repository $REPOSITORY
-    - git commit -am "update image preprod tag" && git push origin restricted
+  needs: [Push-prod-preprod]
 
 deploy-prod:
-  stage: deploy
+  <<: *template_deploy_into_restricted_infrastructure
+  variables:
+    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
   when: manual
+  allow_failure: false
   only:
     - tags
-  script:
-    ## SSH Configuration
-    - apk add git
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - cat ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
-    - ssh -q -T git@gitlab.com
-
-    ## GIT Configuration
-    - git config --global user.name $GITLAB_USER_LOGIN
-    - git config --global user.email $GITLAB_USER_EMAIL
-
-    ## Clone, commit & push
-    - git clone ${SSH_URL_TO_MANIFEST_REPO} && cd "$(basename "$_" .git)"
-    - git checkout restricted
-
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values-prod.yaml app_version $CI_COMMIT_TAG
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml image_name $PROJECT_NAME
-    - docker run --rm -v ${PWD}:/workdir mikefarah/yq:3.2.1 yq write --inplace values.yaml repository $REPOSITORY
-    - git commit -am "update prod image tag" && git push origin restricted
-
+  needs: [Push-prod-preprod]
