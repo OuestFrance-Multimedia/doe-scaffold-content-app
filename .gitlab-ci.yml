@@ -69,7 +69,7 @@ Build:
   script:
     - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
     - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest || true
-    - # `docker build` your image here
+    # - `docker build` your image here
     - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest
     - docker images
     - docker push $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
@@ -80,8 +80,8 @@ Test Unit:
   script:
     - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
     - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
-    - # `docker run` your container here
-    - # `docker exec` your tests here
+    # - `docker run` your container here
+    # - `docker exec` your tests here
   # Extract code coverage to get the info in gitlab : https://docs.gitlab.com/ee/ci/yaml/#coverage
   # coverage: /^\s*Lines:\s*\d+.\d+\%/
 
@@ -130,7 +130,8 @@ Push-prod-preprod:
 deploy-dev1:
   <<: *template_deploy_into_unrestricted_infrastructure
   variables:
-    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
+    # insert the name of the helm yaml values file for this platform
+    VALUES_FILENAME: ""
   when: manual
   except:
     - tags
@@ -140,7 +141,8 @@ deploy-dev1:
 deploy-rec1:
   <<: *template_deploy_into_unrestricted_infrastructure
   variables:
-    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
+    # insert the name of the helm yaml values file for this platform
+    VALUES_FILENAME: ""
   only:
     - develop
   needs: [Push-rec]
@@ -148,7 +150,8 @@ deploy-rec1:
 deploy-preprod:
   <<: *template_deploy_into_restricted_infrastructure
   variables:
-    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
+    # insert the name of the helm yaml values file for this platform
+    VALUES_FILENAME: ""
   only:
     - tags
   needs: [Push-prod-preprod]
@@ -156,9 +159,11 @@ deploy-preprod:
 deploy-prod:
   <<: *template_deploy_into_restricted_infrastructure
   variables:
-    VALUES_FILENAME: # insert the name of the helm yaml values file for this platform
+    # insert the name of the helm yaml values file for this platform
+    VALUES_FILENAME: ""
   when: manual
   allow_failure: false
   only:
     - tags
   needs: [Push-prod-preprod]
+
