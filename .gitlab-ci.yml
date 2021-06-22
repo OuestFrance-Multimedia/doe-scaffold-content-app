@@ -1,17 +1,22 @@
 .template_push_into_registry: &template_push_into_registry
   stage: push
+  image: gcr.io/google.com/cloudsdktool/cloud-sdk:alpine
   before_script:
-    # récupération de l'image dans la registry de dev
-    - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
-    - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+    # Log to Google Cloud platform
+    - echo "$GOOGLE_APPLICATION_CREDENTIALS" > "$(pwd)/google-application-credentials.json"
+    - gcloud auth activate-service-account --key-file=$(pwd)/google-application-credentials.json
+  script:
+    # Configure Docker to use the project registry (Google Artifact Registry)
+    - gcloud auth configure-docker ${REPOSITORY%%/*} --quiet
+    # Check if IMAGE_TAG already exists (Retry case)
+    - EXISTS=$(gcloud artifacts docker tags list $REPOSITORY/$CI_PROJECT_NAME --format=yaml --filter="tag~"$IMAGE_TAG || :)
+    # If not exists, login, pull, tag and push image
+    - test -z $EXISTS && docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - test -z $EXISTS && docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG
+    - test -z $EXISTS && docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG $REPOSITORY/$CI_PROJECT_NAME:$IMAGE_TAG
+    - test -z $EXISTS && docker push $REPOSITORY/$CI_PROJECT_NAME:$IMAGE_TAG
 
-    # Install gcloud sdk
-    - apk upgrade && apk add --no-cache curl openssl jq python3
-    - curl -s https://dl.google.com/dl/cloudsdk/release/google-cloud-sdk.tar.gz > /tmp/google-cloud-sdk.tar.gz
-    - mkdir -p /usr/local/gcloud && tar -C /usr/local/gcloud -xvf /tmp/google-cloud-sdk.tar.gz && /usr/local/gcloud/google-cloud-sdk/install.sh --quiet
-    - export PATH=$PATH:/usr/local/gcloud/google-cloud-sdk/bin
-
-.template_deploy: &template_deploy
+.template_deploy_into_infrastructure: &template_deploy_into_infrastructure
   stage: deploy
   before_script:
     ## SSH Configuration
@@ -24,34 +29,13 @@
     ## GIT Configuration
     - git config --global user.name $GITLAB_USER_LOGIN
     - git config --global user.email $GITLAB_USER_EMAIL
-
-.template_deploy_into_restricted_infrastructure: &template_deploy_into_restricted_infrastructure
-  <<: *template_deploy
   script:
-    - export VAR_PROJECTID=$(basename ${REPOSITORY_RESTRICTED%/*})
     ## Clone, commit & push
-    - git clone $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
-    - git checkout restricted
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.registry = "'${REPOSITORY_RESTRICTED%%/*}'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.repository = "'${REPOSITORY_RESTRICTED#*/}/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.tag = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.env.fromValues.APP_VERSION = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.gcloudsqlproxy.cloudsql.instances[0].project = "'${VAR_PROJECTID}'"' --inplace $VALUES_FILENAME
-    - git commit -am "update image tag" && git push origin restricted
+    - git clone -b $BRANCH --single-branch $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.image.repository = "'$REPOSITORY/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
+    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.image.tag = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
+    - git commit -am "update image tag" && git push origin $BRANCH
 
-.template_deploy_into_unrestricted_infrastructure: &template_deploy_into_unrestricted_infrastructure
-  <<: *template_deploy
-  script:
-    - export VAR_PROJECTID=$(basename ${REPOSITORY_UNRESTRICTED%/*})
-    ## Clone, commit & push
-    - git clone $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
-    - git checkout unrestricted
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.registry = "'${REPOSITORY_UNRESTRICTED%%/*}'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.repository = "'${REPOSITORY_UNRESTRICTED#*/}/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.app.tag = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.env.fromValues.APP_VERSION = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.gcloudsqlproxy.cloudsql.instances[0].project = "'${VAR_PROJECTID}'"' --inplace $VALUES_FILENAME
-    - git commit -am "update image tag" && git push origin unrestricted
 
 image: docker:20.10
 
@@ -66,13 +50,26 @@ stages:
 
 Build:
   stage: build
+  variables: {}
+    # DOCKER_BUILDKIT: 1
   script:
+    - export IMAGE_TAG=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
     - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
     - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest || true
     # - `docker build` your image here
+    # - >
+    #   docker build \
+    #     --build-arg BUILDKIT_INLINE_CACHE=1 \
+    #     --cache-from $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest \
+    #     --tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA \
+    #     --secret id=gcp,src=$GOOGLE_APPLICATION_CREDENTIALS_immo_datascience_fa098019c4fc \
+    #     --file build/Dockerfile \
+    #     .
     - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest
+    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG
     - docker images
     - docker push $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+    - docker push $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG
     - docker push $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest
 
 Test Unit:
@@ -87,49 +84,42 @@ Test Unit:
 
 Push-dev:
   <<: *template_push_into_registry
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    REPOSITORY: $REPOSITORY_UNRESTRICTED
+    GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
+    IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   when: manual
   except :
     - tags
     - master
     - develop
-  script:
-    # Configure Docker to use the project registry (Google Artifact Registry) 
-    - gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
-    - gcloud auth configure-docker ${REPOSITORY_UNRESTRICTED%%/*} --quiet
-
-    # Build & Push
-    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
-    - docker push $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
 
 Push-rec:
   <<: *template_push_into_registry
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    REPOSITORY: $REPOSITORY_UNRESTRICTED
+    GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
+    IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   only :
     - develop
-  script:
-    # Configure Docker to use the project registry (Google Artifact Registry)
-    - gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
-    - gcloud auth configure-docker ${REPOSITORY_UNRESTRICTED%%/*} --quiet
-
-    # Build & Push
-    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
-    - docker push $REPOSITORY_UNRESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
 
 Push-prod-preprod:
   <<: *template_push_into_registry
-  only:
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    REPOSITORY: $REPOSITORY_RESTRICTED
+    GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
+    IMAGE_TAG: $CI_COMMIT_TAG
+  only :
     - tags
-  script:
-    # Configure Docker to use the project registry (Google Artifact Registry) 
-    - gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
-    - gcloud auth configure-docker ${REPOSITORY_RESTRICTED%%/*} --quiet
-
-    # Build & Push
-    - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $REPOSITORY_RESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_TAG
-    - docker push $REPOSITORY_RESTRICTED/$CI_PROJECT_NAME:$CI_COMMIT_TAG
 
 deploy-dev1:
-  <<: *template_deploy_into_unrestricted_infrastructure
+  <<: *template_deploy_into_infrastructure
   variables:
+    REPOSITORY: $REPOSITORY_UNRESTRICTED
+    BRANCH: unrestricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
   when: manual
@@ -139,8 +129,10 @@ deploy-dev1:
     - develop
 
 deploy-rec1:
-  <<: *template_deploy_into_unrestricted_infrastructure
+  <<: *template_deploy_into_infrastructure
   variables:
+    REPOSITORY: $REPOSITORY_UNRESTRICTED
+    BRANCH: unrestricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
   only:
@@ -148,8 +140,10 @@ deploy-rec1:
   needs: [Push-rec]
 
 deploy-preprod:
-  <<: *template_deploy_into_restricted_infrastructure
+  <<: *template_deploy_into_infrastructure
   variables:
+    REPOSITORY: $REPOSITORY_RESTRICTED
+    BRANCH: restricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
   only:
@@ -157,8 +151,10 @@ deploy-preprod:
   needs: [Push-prod-preprod]
 
 deploy-prod:
-  <<: *template_deploy_into_restricted_infrastructure
+  <<: *template_deploy_into_infrastructure
   variables:
+    REPOSITORY: $REPOSITORY_RESTRICTED
+    BRANCH: restricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
   when: manual
