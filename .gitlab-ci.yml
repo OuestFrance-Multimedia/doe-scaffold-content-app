@@ -62,7 +62,7 @@ Build:
     #     --build-arg BUILDKIT_INLINE_CACHE=1 \
     #     --cache-from $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest \
     #     --tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA \
-    #     --secret id=gcp,src=$GOOGLE_APPLICATION_CREDENTIALS_immo_datascience_fa098019c4fc \
+    #     --secret id=gcp,src=$GOOGLE_APPLICATION_CREDENTIALS_BUCKET \
     #     --file build/Dockerfile \
     #     .
     - docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest
