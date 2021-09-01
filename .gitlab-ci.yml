@@ -6,38 +6,74 @@
     - echo "$GOOGLE_APPLICATION_CREDENTIALS" > "$(pwd)/google-application-credentials.json"
     - gcloud auth activate-service-account --key-file=$(pwd)/google-application-credentials.json
   script:
-    # Configure Docker to use the project registry (Google Artifact Registry)
-    - gcloud auth configure-docker ${REPOSITORY%%/*} --quiet
     # Check if IMAGE_TAG already exists (Retry case)
-    - EXISTS=$(gcloud artifacts docker tags list $REPOSITORY/$CI_PROJECT_NAME --format=yaml --filter="tag~"$IMAGE_TAG || :)
+    - gcloud artifacts docker tags list $REPOSITORY/$CI_PROJECT_NAME --format="table[box,title='artifacts docker tags list'](tag.basename(),image,version.basename():label=DIGEST)"
     # If not exists, login, pull, tag and push image
-    - test -z $EXISTS && docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
-    - test -z $EXISTS && docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG
-    - test -z $EXISTS && docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG $REPOSITORY/$CI_PROJECT_NAME:$IMAGE_TAG
-    - test -z $EXISTS && docker push $REPOSITORY/$CI_PROJECT_NAME:$IMAGE_TAG
+    - |
+        /bin/bash <<'EOF'
+          set -x
+          TAG_EXISTS=$(gcloud artifacts docker tags list $REPOSITORY/$CI_PROJECT_NAME --format="value(tag)" --filter="tag~"$IMAGE_TAG || :)
+          if [ -z "$TAG_EXISTS" ]; then
+            gcloud auth configure-docker ${REPOSITORY%%/*} --quiet
+            docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+            docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG
+            docker tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$IMAGE_TAG $REPOSITORY/$CI_PROJECT_NAME:$IMAGE_TAG
+            docker push $REPOSITORY/$CI_PROJECT_NAME:$IMAGE_TAG
+          fi
+        EOF
 
 .template_deploy_into_infrastructure: &template_deploy_into_infrastructure
   stage: deploy
   before_script:
-    ## SSH Configuration
-    - apk add git
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - cat $SSH_PRIVATE_KEY > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan gitlab.com > ~/.ssh/known_hosts
-    - ssh -q -T git@gitlab.com
-
-    ## GIT Configuration
-    - git config --global user.name $GITLAB_USER_LOGIN
-    - git config --global user.email $GITLAB_USER_EMAIL
+    # SSH Configuration
+    - export SHARED_ROOT_PATH=/builds/$CI_PROJECT_PATH/shared/home/root
+    - mkdir -p ${SHARED_ROOT_PATH}/.ssh && chmod 700 ${SHARED_ROOT_PATH}/.ssh
+    - cat $SSH_PRIVATE_KEY > ${SHARED_ROOT_PATH}/.ssh/id_rsa && chmod 600 ${SHARED_ROOT_PATH}/.ssh/id_rsa
+    - function docker_run() { docker run --rm --user $(id -u):$(id -g) -v ${SHARED_ROOT_PATH}:/root:rw -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro "$@"; }
+    - docker_run --entrypoint "sh" alpine/git -c "ssh-keyscan gitlab.com > ~/.ssh/known_hosts"
+    - docker_run --entrypoint "sh" alpine/git -c "ssh -q -T git@gitlab.com"
   script:
-    ## Clone, commit & push
-    - git clone -b $BRANCH --single-branch $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.image.repository = "'$REPOSITORY/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
-    - docker run --rm -v $PWD:/workdir mikefarah/yq:4.7.0 eval '.image.tag = "'${CI_COMMIT_TAG}'"' --inplace $VALUES_FILENAME
-    - git commit -am "update image tag" && git push origin $BRANCH
-
-
+    # Clone repo & change dir
+    - docker_run -v $PWD:/git alpine/git clone -b $BRANCH --single-branch $SSH_URL_TO_MANIFEST_REPO && cd $(basename $SSH_URL_TO_MANIFEST_REPO|sed -r s/\.git$//)
+    # GIT Configuration
+    - docker_run -v $PWD:/git alpine/git config user.name "$GITLAB_USER_LOGIN"
+    - docker_run -v $PWD:/git alpine/git config user.email "$GITLAB_USER_EMAIL"
+    # Change Image repository & tag
+    - docker_run -v $PWD:/workdir mikefarah/yq:4 eval '.image.repository = "'$REPOSITORY/$CI_PROJECT_NAME'"' --inplace $VALUES_FILENAME
+    - docker_run -v $PWD:/workdir mikefarah/yq:4 eval '.image.tag = "'${IMAGE_TAG}'"' --inplace $VALUES_FILENAME
+    # Commit & push
+    - docker_run -v $PWD:/git alpine/git commit -am "update image tag"
+    - docker_run -v $PWD:/git alpine/git push origin $BRANCH
 image: docker:20.10
+
+# Shared Runners on GitLab.com run in autoscale mode and are powered by Google Cloud Platform.
+# Following variables definition works well in order to enable TLS when using docker in docker service.
+# We can suppose Shared Runners are executed in a kubernetes environment.
+# https://docs.gitlab.com/ee/ci/docker/using_docker_build.html#docker-in-docker-with-tls-enabled-in-kubernetes
+variables:
+  # When using dind service, you must instruct Docker to talk with
+  # the daemon started inside of the service. The daemon is available
+  # with a network connection instead of the default
+  # /var/run/docker.sock socket.
+  DOCKER_HOST: tcp://docker:2376
+  #
+  # The 'docker' hostname is the alias of the service container as described at
+  # https://docs.gitlab.com/ee/ci/docker/using_docker_images.html#accessing-the-services.
+  # If you're using GitLab Runner 12.7 or earlier with the Kubernetes executor and Kubernetes 1.6 or earlier,
+  # the variable must be set to tcp://localhost:2376 because of how the
+  # Kubernetes executor connects services to the job container
+  # DOCKER_HOST: tcp://localhost:2376
+  #
+  # Specify to Docker where to create the certificates. Docker
+  # creates them automatically on boot, and creates
+  # `/certs/client` to share between the service and job
+  # container, thanks to volume mount from config.toml
+  DOCKER_TLS_CERTDIR: "/certs"
+  # These are usually specified by the entrypoint, however the
+  # Kubernetes executor doesn't run entrypoints
+  # https://gitlab.com/gitlab-org/gitlab-runner/-/issues/4125
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
 
 services:
   - docker:20.10-dind
@@ -50,15 +86,17 @@ stages:
 
 Build:
   stage: build
-  variables: {}
-    # DOCKER_BUILDKIT: 1
+  variables:
+    DOCKER_BUILDKIT: 1
   script:
     - export IMAGE_TAG=${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
     - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
     - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest || true
-    # - `docker build` your image here
+    
+    - echo "`docker build` your image here and remove this line" && exit 1
     # - >
     #   docker build \
+    #     --progress=plain \
     #     --build-arg BUILDKIT_INLINE_CACHE=1 \
     #     --cache-from $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:latest \
     #     --tag $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA \
@@ -85,9 +123,11 @@ Test Unit:
 Push-dev:
   <<: *template_push_into_registry
   variables:
-    DOCKER_HOST: tcp://docker:2375
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_UNRESTRICTED
+    # define Gitlab variable which contains Google Application Credentials: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED or $GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
     GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
     IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   when: manual
   except :
@@ -98,9 +138,11 @@ Push-dev:
 Push-rec:
   <<: *template_push_into_registry
   variables:
-    DOCKER_HOST: tcp://docker:2375
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_UNRESTRICTED
+    # define Gitlab variable which contains Google Application Credentials: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED or $GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
     GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
     IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   only :
     - develop
@@ -108,9 +150,11 @@ Push-rec:
 Push-prod-preprod:
   <<: *template_push_into_registry
   variables:
-    DOCKER_HOST: tcp://docker:2375
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_RESTRICTED
+    # define Gitlab variable which contains Google Application Credentials: $GOOGLE_APPLICATION_CREDENTIALS_UNRESTRICTED or $GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
     GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS_RESTRICTED
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
     IMAGE_TAG: $CI_COMMIT_TAG
   only :
     - tags
@@ -118,10 +162,14 @@ Push-prod-preprod:
 deploy-dev1:
   <<: *template_deploy_into_infrastructure
   variables:
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_UNRESTRICTED
+    # define branch on platform repository to use : unrestricted or restricted
     BRANCH: unrestricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
+    IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   when: manual
   except:
     - tags
@@ -131,10 +179,14 @@ deploy-dev1:
 deploy-rec1:
   <<: *template_deploy_into_infrastructure
   variables:
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_UNRESTRICTED
+    # define branch on platform repository to use : unrestricted or restricted
     BRANCH: unrestricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
+    IMAGE_TAG: $CI_COMMIT_SHORT_SHA
   only:
     - develop
   needs: [Push-rec]
@@ -142,10 +194,14 @@ deploy-rec1:
 deploy-preprod:
   <<: *template_deploy_into_infrastructure
   variables:
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_RESTRICTED
+    # define branch on platform repository to use : unrestricted or restricted
     BRANCH: restricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
+    IMAGE_TAG: $CI_COMMIT_TAG
   only:
     - tags
   needs: [Push-prod-preprod]
@@ -153,10 +209,14 @@ deploy-preprod:
 deploy-prod:
   <<: *template_deploy_into_infrastructure
   variables:
+    # define Gitlab variable which contain container image repository (registry): $REPOSITORY_UNRESTRICTED or $REPOSITORY_RESTRICTED
     REPOSITORY: $REPOSITORY_RESTRICTED
+    # define branch on platform repository to use : unrestricted or restricted
     BRANCH: restricted
     # insert the name of the helm yaml values file for this platform
     VALUES_FILENAME: ""
+    # define Gitlab variable which contains image tag, based on $CI_COMMIT_TAG or $CI_COMMIT_SHORT_SHA
+    IMAGE_TAG: $CI_COMMIT_TAG
   when: manual
   allow_failure: false
   only:
