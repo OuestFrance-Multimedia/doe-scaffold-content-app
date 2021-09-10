@@ -29,11 +29,11 @@ include:
   # define branch on platform repository to use : unrestricted or restricted
   BRANCH: restricted
 
-stages:
-  - build
-  - tests
-  - push
-  - deploy
+# stages:
+#   - build
+#   - tests
+#   - push
+#   - deploy
 
 build:
   extends: .build
@@ -58,15 +58,15 @@ build:
     # The Docker build context refers to the files and directories that will be available to the Docker engine when you run docker build
     DOCKER_BUILD_CONTEXT: .
 
-test-unit:
-  stage: tests
-  script:
-    - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
-    - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
-    # - `docker run` your container here
-    # - `docker exec` your tests here
-  # Extract code coverage to get the info in gitlab : https://docs.gitlab.com/ee/ci/yaml/#coverage
-  # coverage: /^\s*Lines:\s*\d+.\d+\%/
+# test-unit:
+#   stage: tests
+#   script:
+#     - docker login registry.gitlab.com -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+#     - docker pull $CI_REGISTRY/$CI_PROJECT_PATH/$CI_PROJECT_NAME:$CI_COMMIT_SHORT_SHA
+#     # - `docker run` your container here
+#     # - `docker exec` your tests here
+#   # Extract code coverage to get the info in gitlab : https://docs.gitlab.com/ee/ci/yaml/#coverage
+#   # coverage: /^\s*Lines:\s*\d+.\d+\%/
 
 push-dev:
   needs: [build]
