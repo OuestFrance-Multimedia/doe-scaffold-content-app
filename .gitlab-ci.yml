@@ -46,12 +46,12 @@ build:
     # in a safe way that will not end up stored in the final image.
     # References:
     # - https://docs.docker.com/develop/develop-images/build_enhancements/#new-docker-build-secret-information
-    # You can add CI/CD variable of type `file` and by path to the temp file, example: /builds/${CI_PROJECT_PATH}.tmp/[KEY]
+    # You can add CI/CD variable of type `file` and by path to the temp file, example: ${CI_PROJECT_DIR}.tmp/[KEY]
     # References:
     # - https://docs.gitlab.com/ee/ci/variables/index.html#add-a-cicd-variable-to-a-project
     # - https://docs.gitlab.com/ee/ci/variables/index.html#add-a-cicd-variable-to-a-group
     # 20 indexes can be used: DOCKER_BUILD_SECRET_01 to DOCKER_BUILD_SECRET_20
-    # DOCKER_BUILD_SECRET_01: id=google_application_credentials_bucket,src=/builds/${CI_PROJECT_PATH}.tmp/GOOGLE_APPLICATION_CREDENTIALS_BUCKET
+    # DOCKER_BUILD_SECRET_01: id=google_application_credentials_bucket,src=${CI_PROJECT_DIR}.tmp/GOOGLE_APPLICATION_CREDENTIALS_BUCKET
 
     # Name of the Dockerfile (Default is 'build/Dockerfile')
     DOCKER_BUILD_DOCKERFILE: build/Dockerfile
