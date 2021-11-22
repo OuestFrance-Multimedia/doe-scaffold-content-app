@@ -1,5 +1,5 @@
 include:
-  - project: additi/internal/dsi-devops-engineers/gitlab-templates-common
+  - project: additi/external/gitlab-templates-common
     file: .gitlab-ci-common.yml
     ref: master
 
