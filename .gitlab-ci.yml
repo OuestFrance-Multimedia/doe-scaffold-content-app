@@ -129,7 +129,7 @@ push-prod-preprod:
   only :
     - tags
 
-scan_image-rec:
+scan_image-prod-preprod:
   needs: [push-prod-preprod]
   extends: .scan_image
   allow_failure: true
