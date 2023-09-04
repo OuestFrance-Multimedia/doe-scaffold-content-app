@@ -29,11 +29,11 @@ include:
   # define branch on platform repository to use : unrestricted or restricted
   BRANCH: restricted
 
-# stages:
-#   - build
-#   - tests
-#   - push
-#   - deploy
+stages:
+  - build
+  - push
+  - scan_image
+  - deploy
 
 build:
   extends: .build
@@ -97,6 +97,17 @@ push-rec:
     - master
     - develop
 
+scan_image-rec:
+  needs: [push-rec]
+  extends: .scan_image
+  allow_failure: true
+  variables:
+    <<: *variables-unrestricted
+  except:
+    - tags
+    - master
+    - develop
+
 deploy-rec1:
   needs: [push-rec]
   extends: .deploy
@@ -116,6 +127,15 @@ push-prod-preprod:
   variables:
     <<: *variables-restricted
   only :
+    - tags
+
+scan_image-rec:
+  needs: [push-prod-preprod]
+  extends: .scan_image
+  allow_failure: true
+  variables:
+    <<: *variables-restricted
+  only:
     - tags
 
 deploy-preprod:
